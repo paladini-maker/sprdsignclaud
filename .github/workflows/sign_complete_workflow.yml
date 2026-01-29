@@ -10,64 +10,90 @@ on:
       EXTRA_KEY_TREE_URL:
         description: 'EXTRA_KEY_TREE_URL (leave blank if you only use unisoc keys)'
         required: false
+        default: ''
       EXTRA_KEY_BRANCH:
         description: 'EXTRA_KEY_BRANCH (leave blank if you only use unisoc keys)'
         required: false
+        default: ''
+
+# Necesario para que el job pueda crear releases con GITHUB_TOKEN
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/catthehacker/ubuntu:runner-20.04
-      
+
     steps:
-      - name: Checkout
+      - name: Quick apt-get update (early)
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends apt-utils ca-certificates
+      - name: Checkout repo
         uses: actions/checkout@v4
         with:
           ref: main
           path: main
-          
+
       - name: Setup SSH Keys
         if: ${{ startsWith(github.event.inputs.EXTRA_KEY_TREE_URL, 'git@github.com') }}
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: |
             ${{ secrets.SSH_PRIVATE_KEY }}
-            
-      - name: Clone extra keys
-        if: |
-          github.event.inputs.EXTRA_KEY_TREE_URL != null &&
-          github.event.inputs.EXTRA_KEY_BRANCH != null
+
+      - name: Clone extra keys (if provided)
+        if: ${{ github.event.inputs.EXTRA_KEY_TREE_URL != '' && github.event.inputs.EXTRA_KEY_BRANCH != '' }}
         run: |
-          git clone ${{ github.event.inputs.EXTRA_KEY_TREE_URL }} -b ${{ github.event.inputs.EXTRA_KEY_BRANCH }} ./extra_key
-          
-      - name: Install dependencies
+          git clone "${{ github.event.inputs.EXTRA_KEY_TREE_URL }}" -b "${{ github.event.inputs.EXTRA_KEY_BRANCH }}" ./extra_key
+
+      - name: Install dependencies (full)
         run: |
-          sudo apt update
-          sudo apt -y install build-essential python openssl curl wget busybox
-          wget https://bootstrap.pypa.io/pip/2.7/get-pip.py
-          sudo python2.7 get-pip.py
-          pip2 install pycryptodome
-          
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            build-essential python2 python2-dev python3 python3-pip python-is-python3 \
+            openssl curl wget busybox jq ca-certificates
+          # ensure python2 binary exists at /usr/bin/python2
+          if ! command -v python2 >/dev/null 2>&1; then
+            sudo ln -s /usr/bin/python2.7 /usr/bin/python2 || true
+          fi
+          # bootstrap pip for python2 (if you really need pip2)
+          curl -fsSL https://bootstrap.pypa.io/pip/2.7/get-pip.py -o get-pip.py
+          sudo python2 get-pip.py
+          sudo python2 -m pip install --upgrade pip
+          sudo python2 -m pip install pycryptodome
+
       - name: Download resources
         run: |
-          curl -o original.zip -L "${{ github.event.inputs.ZIP_URL }}"
-          curl -o avbtool.tgz -L "https://android.googlesource.com/platform/external/avb/+archive/refs/heads/pie-release.tar.gz"
-          curl -o magisk.apk -L $(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases | grep -Po -m 1 '(?<=download_url\": \").*Magisk.*Magisk.*apk')
-          wget https://raw.githubusercontent.com/magojohnji/magiskboot-linux/main/x86_64/magiskboot
-          chmod +x magiskboot
-          
+          set -euo pipefail
+          curl -L -o original.zip "${{ github.event.inputs.ZIP_URL }}"
+          curl -L -o avbtool.tgz "https://android.googlesource.com/platform/external/avb/+archive/refs/heads/pie-release.tar.gz"
+          # Download magisk apk: use GitHub API + jq for a robust selection of asset
+          MGURL="$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest | jq -r '.assets[] | select(.name | test("Magisk.*apk")) | .browser_download_url' | head -n1)"
+          if [ -n "$MGURL" ]; then
+            curl -L -o magisk.apk "$MGURL"
+          else
+            echo "Magisk download URL not found via API"
+          fi
+          wget -q -O magiskboot https://raw.githubusercontent.com/magojohnji/magiskboot-linux/main/x86_64/magiskboot || true
+          chmod +x magiskboot || true
+
       - name: Prepare scripts
         run: |
           chmod +x main/*.sh
           cp main/sign_modified.sh ./sign.sh
           cp main/sign_avb_enhanced.sh ./main/sign_avb.sh
           chmod +x ./sign.sh
-          
+
       - name: Execute signing process
         run: |
           ./sign.sh
-          
+
       - name: Upload to Release
         uses: softprops/action-gh-release@v1
         with:
@@ -77,9 +103,9 @@ jobs:
           tag_name: ${{ github.run_id }}
           body: |
             **Firmware Resigned**
-            
+
             URL: ${{ github.event.inputs.ZIP_URL }}
-            
+
             **Partitions processed:**
             - boot (with Magisk)
             - dtbo
@@ -88,7 +114,7 @@ jobs:
             - vbmeta_system (product + system)
             - vbmeta_vendor
             - Bootloader components (splloader/uboot/sml/trustos/teecfg)
-            
+
             **Public keys used:**
             - boot/dtbo: Same key (SHA1: 54eda7333562e6fe6fcb9fa2a66afb3d5c09a94e)
             - recovery: Different key (SHA1: 0be51f630bc4555d14ab8a7f7eb10acc580d5d3f)
