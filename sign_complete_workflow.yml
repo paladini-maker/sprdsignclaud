@@ -1,0 +1,98 @@
+name: sign_complete
+
+on:
+  workflow_dispatch:
+    inputs:
+      ZIP_URL:
+        description: 'URL of firmware ZIP (boot+dtbo+recovery+vbmeta+vbmeta_system+vbmeta_vendor+bootloader)'
+        required: true
+        default: ''
+      EXTRA_KEY_TREE_URL:
+        description: 'EXTRA_KEY_TREE_URL (leave blank if you only use unisoc keys)'
+        required: false
+      EXTRA_KEY_BRANCH:
+        description: 'EXTRA_KEY_BRANCH (leave blank if you only use unisoc keys)'
+        required: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/catthehacker/ubuntu:runner-20.04
+      
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main
+          
+      - name: Setup SSH Keys
+        if: ${{ startsWith(github.event.inputs.EXTRA_KEY_TREE_URL, 'git@github.com') }}
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: |
+            ${{ secrets.SSH_PRIVATE_KEY }}
+            
+      - name: Clone extra keys
+        if: |
+          github.event.inputs.EXTRA_KEY_TREE_URL != null &&
+          github.event.inputs.EXTRA_KEY_BRANCH != null
+        run: |
+          git clone ${{ github.event.inputs.EXTRA_KEY_TREE_URL }} -b ${{ github.event.inputs.EXTRA_KEY_BRANCH }} ./extra_key
+          
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt -y install build-essential python openssl curl wget busybox
+          wget https://bootstrap.pypa.io/pip/2.7/get-pip.py
+          sudo python2.7 get-pip.py
+          pip2 install pycryptodome
+          
+      - name: Download resources
+        run: |
+          curl -o original.zip -L "${{ github.event.inputs.ZIP_URL }}"
+          curl -o avbtool.tgz -L "https://android.googlesource.com/platform/external/avb/+archive/refs/heads/pie-release.tar.gz"
+          curl -o magisk.apk -L $(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases | grep -Po -m 1 '(?<=download_url\": \").*Magisk.*Magisk.*apk')
+          wget https://raw.githubusercontent.com/magojohnji/magiskboot-linux/main/x86_64/magiskboot
+          chmod +x magiskboot
+          
+      - name: Prepare scripts
+        run: |
+          chmod +x main/*.sh
+          cp main/sign_modified.sh ./sign.sh
+          cp main/sign_avb_enhanced.sh ./main/sign_avb.sh
+          chmod +x ./sign.sh
+          
+      - name: Execute signing process
+        run: |
+          ./sign.sh
+          
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            resigned.zip
+          name: ${{ github.run_id }}
+          tag_name: ${{ github.run_id }}
+          body: |
+            **Firmware Resigned**
+            
+            URL: ${{ github.event.inputs.ZIP_URL }}
+            
+            **Partitions processed:**
+            - boot (with Magisk)
+            - dtbo
+            - recovery
+            - vbmeta (main chain descriptor)
+            - vbmeta_system (product + system)
+            - vbmeta_vendor
+            - Bootloader components (splloader/uboot/sml/trustos/teecfg)
+            
+            **Public keys used:**
+            - boot/dtbo: Same key (SHA1: 54eda7333562e6fe6fcb9fa2a66afb3d5c09a94e)
+            - recovery: Different key (SHA1: 0be51f630bc4555d14ab8a7f7eb10acc580d5d3f)
+            - vbmeta_system: Custom key (SHA1: dc67561ffc74bddc5525f9c2cddf13375e685d13)
+            - vbmeta_vendor: Custom key (SHA1: cccdbe264bc457f8c72b8e278fd391bdb0f4af5d)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
